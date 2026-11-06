@@ -32,7 +32,19 @@ def load_model(path: str, device: torch.device, dtype: torch.dtype, device_map: 
     major, minor = (int(x) for x in transformers.__version__.split(".")[:2])
     kw = "dtype" if (major, minor) >= (4, 56) else "torch_dtype"
     extra = {"device_map": device_map} if device_map else {}
-    model = AutoModelForCausalLM.from_pretrained(path, **{kw: dtype}, **extra)
+    adapter_cfg = os.path.join(path, "adapter_config.json")
+    if os.path.isfile(adapter_cfg):
+        # a saved watermark is a LoRA adapter (~70 MB) on top of its base model: load base, merge adapter
+        import json
+
+        from peft import PeftModel
+
+        with open(adapter_cfg) as f:
+            base = json.load(f)["base_model_name_or_path"]
+        model = AutoModelForCausalLM.from_pretrained(base, **{kw: dtype}, **extra)
+        model = PeftModel.from_pretrained(model, path).merge_and_unload()
+    else:
+        model = AutoModelForCausalLM.from_pretrained(path, **{kw: dtype}, **extra)
     if not device_map:
         model.to(device)
     model.eval()

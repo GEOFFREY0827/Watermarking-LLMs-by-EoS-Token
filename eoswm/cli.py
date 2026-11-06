@@ -73,7 +73,14 @@ def cmd_embed(args):
                             lam_spec=args.lam_spec, lam_kl=args.lam_kl, lam_eos=args.lam_eos,
                             lora_r=args.lora_r, device=device)
     _log(args, report(model, tok, anchors, name="watermarked", device=device))
-    _save(model, tok, args.out)
+    if args.save_merged:
+        _save(model.merge_and_unload(), tok, args.out)
+    else:  # adapter only (~70 MB for 1.5B); load_model() merges it onto the base model again
+        os.makedirs(args.out, exist_ok=True)
+        model.save_pretrained(args.out)
+        with open(os.path.join(args.out, TOKENIZER_POINTER), "w") as f:
+            f.write(tok.name_or_path)
+        print(f"saved LoRA adapter -> {args.out}")
 
 
 def cmd_verify(args):
@@ -177,6 +184,8 @@ def main():
     p.add_argument("--lam-kl", type=float, default=1.0)
     p.add_argument("--lam-eos", type=float, default=1.0, help="keep unpatched EOS log-odds equal to the base model")
     p.add_argument("--lora-r", type=int, default=16)
+    p.add_argument("--save-merged", action="store_true",
+                   help="save the full merged model (several GB) instead of the LoRA adapter")
     _common(p)
     p.set_defaults(fn=cmd_embed)
 

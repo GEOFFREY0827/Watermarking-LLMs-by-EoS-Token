@@ -81,7 +81,7 @@ def embed_watermark(model, tok, anchors, steps=400, lr=3e-4, bs=8, margin=3.0, l
                   f"kl {loss_kl.item():.4f} eos {loss_eos.item():.4f} | {time.time() - t0:.0f}s", flush=True)
 
     model.eval()
-    return model.merge_and_unload()
+    return model  # PeftModel: save the adapter, or call merge_and_unload() for a plain model
 
 
 def readout(model, tok, anchors, device=None, bs=8):

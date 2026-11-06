@@ -88,7 +88,8 @@ python scripts/summarize.py runs/Qwen2.5-1.5B-Instruct/results.jsonl
 
 日志在 `runs/<model>/logs/`。额外参数可以通过 `ANCHOR_ARGS`、`EMBED_ARGS` 传入，例如 `EMBED_ARGS="--lam-eos 5"`。
 
-- 攻击后的模型直接在内存里评估质量，**不写盘**（1.5B 每个约 3 GB，容易超出磁盘配额）；只有水印模型会保存；
+- 攻击后的模型直接在内存里评估质量，**不写盘**（1.5B 每个约 3 GB，容易超出磁盘配额）；
+- 水印模型**只保存 LoRA adapter**（1.5B 约 70 MB），加载时自动合并回基座；需要完整模型时加 `EMBED_ARGS="--save-merged"`；
 - `REUSE=1`：复用已有的 `anchors.pt`、`wm/`、`ref.pt`，只重跑验证和攻击；
 - `ATTACK_DATA=hf:tatsu-lab/alpaca`：攻击者用真实的指令数据微调（需要 `datasets`）。默认使用内置 prompt 中**未用于质量评估**的部分；
 - 每次运行会把旧的 `results.jsonl` 改名备份。
