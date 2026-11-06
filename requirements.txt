@@ -1,0 +1,6 @@
+torch>=2.1
+transformers>=4.45
+peft>=0.12
+numpy
+# optional: prompts from Hugging Face datasets (--prompts hf:tatsu-lab/alpaca)
+# datasets
