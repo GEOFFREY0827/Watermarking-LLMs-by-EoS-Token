@@ -93,6 +93,13 @@ python scripts/summarize.py runs/Qwen2.5-1.5B-Instruct/results.jsonl
 - `REUSE=1`：复用已有的 `anchors.pt`、`wm/`、`ref.pt`，只重跑验证和攻击；
 - `ATTACK_DATA=hf:tatsu-lab/alpaca`：攻击者用真实的指令数据微调（需要 `datasets`）。默认使用内置 prompt 中**未用于质量评估**的部分；
 - 每次运行会把旧的 `results.jsonl` 改名备份。
+- **长时间真实数据攻击**：`ATTACK_DATA=hf:tatsu-lab/alpaca DATA_RESPONSES=1 N_EXAMPLES=20000 EVAL_AT=300,1000,3000`
+  用数据集**自带的回答**微调（超过 `--max-resp-tokens` 的回答直接跳过，不截断），在每个检查点评估一次；
+  显存不够时用 `ATTACK_BS=4`；
+- **下游基准**：`BENCH=mmlu,arc,gsm8k`（`BENCH_N` 题/每个，默认 300，固定随机子集，0-shot），用于 base / 水印 / 攻击后
+  模型之间的**相对**比较（实现很轻量，不能直接和公开榜单数字对比）；需要 `pip install datasets`；
+- **冗余编码**：`ANCHOR_ARGS="--pairs-per-bit 4"`，每个比特由 4 个键对携带，读出时取平均，噪声约降为 1/2。
+  键对数变成 `NBITS × 4`，建议同时增加 `STEPS`。
 
 单独的命令：
 

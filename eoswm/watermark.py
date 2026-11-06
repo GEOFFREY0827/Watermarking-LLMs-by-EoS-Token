@@ -48,7 +48,8 @@ def embed_watermark(model, tok, anchors, steps=400, lr=3e-4, bs=8, margin=3.0, l
     L, eos, pad = anchors["layer"], anchors["eos_ids"], tok.pad_token_id
 
     key_pairs, nk_pairs, kl_seqs = anchors["key_pairs"], anchors["nonkey_train_pairs"], anchors["kl_seqs"]
-    sign = torch.tensor([1.0 if b else -1.0 for b in anchors["bits"]], device=device)
+    bit_index = anchors.get("bit_index", list(range(len(key_pairs))))   # pair i carries bit bit_index[i]
+    sign = torch.tensor([1.0 if anchors["bits"][j] else -1.0 for j in bit_index], device=device)
     d0_key = torch.tensor(anchors["key_delta0"], device=device)
     d0_nk = torch.tensor(anchors["nonkey_train_delta0"], device=device)
 
@@ -107,6 +108,13 @@ def binom_tail(n: int, k: int) -> float:
     return sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n
 
 
+def per_bit(x_pairs, anchors):
+    """Average the readouts of all key pairs that carry the same bit (redundant coding; identity if k = 1)."""
+    n_bits = len(anchors["bits"])
+    idx = torch.tensor(anchors.get("bit_index", list(range(len(x_pairs)))))
+    return torch.zeros(n_bits, dtype=x_pairs.dtype).index_add_(0, idx, x_pairs) / torch.bincount(idx, minlength=n_bits)
+
+
 def _decode(x, bits):
     bits_t = torch.tensor(bits)
     bits_hat = (x > x.median()).long()
@@ -122,9 +130,9 @@ def report(model, tok, anchors, name="model", device=None):
     """
     d_key, d0_key, d_nk, d0_nk = readout(model, tok, anchors, device)
     bits, n = anchors["bits"], len(anchors["bits"])
-    m_raw, sep_raw = _decode(d_key - d0_key, bits)
+    m_raw, sep_raw = _decode(per_bit(d_key - d0_key, anchors), bits)
     a, b = fit_drift(d_nk, d0_nk)
-    m_cor, sep_cor = _decode(d_key - (a + b * d0_key), bits)
+    m_cor, sep_cor = _decode(per_bit(d_key - (a + b * d0_key), anchors), bits)
     res = {
         "model": name,
         "n_bits": n,

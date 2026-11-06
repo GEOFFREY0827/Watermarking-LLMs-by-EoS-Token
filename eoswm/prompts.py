@@ -63,3 +63,39 @@ def load_prompts(source: str = "builtin", limit: int | None = None) -> list[str]
     else:
         raise ValueError(f"Unknown prompt source: {source}")
     return prompts[:limit] if limit else prompts
+
+
+def _pair_from_row(r: dict):
+    """(prompt, response) from an instruction-tuning row: alpaca-style instruction/input/output,
+    or prompt/response, or question/answer."""
+    if "instruction" in r and "output" in r:
+        prompt = str(r["instruction"]).strip()
+        if str(r.get("input") or "").strip():
+            prompt += "\n\n" + str(r["input"]).strip()
+        return prompt, str(r["output"]).strip()
+    for p, a in (("prompt", "response"), ("prompt", "completion"), ("question", "answer")):
+        if p in r and a in r:
+            return str(r[p]).strip(), str(r[a]).strip()
+    return None
+
+
+def load_pairs(source: str, limit: int | None = None, seed: int = 0) -> list[tuple[str, str]]:
+    """Real (prompt, response) data for attacker fine-tuning: `hf:<dataset>[:<split>]` (e.g. hf:tatsu-lab/alpaca)
+    or a .jsonl file. Rows are shuffled with `seed` so different attack seeds see different data."""
+    if source.startswith("hf:"):
+        from datasets import load_dataset  # optional dependency
+
+        spec = source[3:].split(":")
+        rows = list(load_dataset(spec[0], split=spec[1] if len(spec) > 1 else "train"))
+    elif os.path.exists(source) and source.endswith(".jsonl"):
+        with open(source, encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    else:
+        raise ValueError(f"--data-responses needs hf:<dataset> or a .jsonl file, got {source}")
+    pairs = [p for p in map(_pair_from_row, rows) if p and p[0] and p[1]]
+    if not pairs:
+        raise ValueError(f"no (prompt, response) fields found in {source}")
+    import random
+
+    random.Random(seed).shuffle(pairs)
+    return pairs[:limit] if limit else pairs

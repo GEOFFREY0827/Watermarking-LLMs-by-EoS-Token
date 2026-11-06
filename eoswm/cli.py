@@ -53,7 +53,7 @@ def cmd_build_anchors(args):
     anchors = build_anchors(model, tok, args.key, n_bits=args.n_bits, layer=args.layer, prompt_source=args.prompts,
                             max_new_tokens=args.max_new_tokens, stop_tau=args.stop_tau,
                             require_natural_stop=not args.allow_forced_stop, device=device,
-                            position=args.position, readout=args.readout)
+                            position=args.position, readout=args.readout, pairs_per_bit=args.pairs_per_bit)
     anchors["base_model"] = args.model
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(anchors, args.out)
@@ -104,6 +104,19 @@ def _evaluate(args, model, tok, anchors, name, device, extra=None):
 
         _log(args, quality_report(model, tok, anchors["heldout_prompts"][:QUALITY_N], args.quality_ref,
                                   name=name, max_new_tokens=args.quality_tokens))
+    _bench(args, model, tok, name)
+
+
+def _bench(args, model, tok, name):
+    if getattr(args, "bench", None):
+        from .benchmarks import bench_report
+
+        _log(args, bench_report(model, tok, args.bench, args.bench_n, name=name))
+
+
+def _bench_args(p):
+    p.add_argument("--bench", default=None, help="comma-separated downstream benchmarks: mmlu,arc,gsm8k (needs datasets)")
+    p.add_argument("--bench-n", type=int, default=300, help="questions per benchmark (fixed random subset)")
 
 
 def cmd_attack(args):
@@ -126,16 +139,40 @@ def cmd_attack(args):
         extra["static_probe_cos_after"], _ = attacks.static_probe_cosine(model, anchors, tok, direction)
         del ref
     elif args.kind in ("sft", "concise", "eosmask", "eosmask-repair"):
-        # never train on the prompts reserved for quality evaluation
-        pool = load_prompts(args.data) if args.data else anchors["heldout_prompts"][QUALITY_N:]
-        prompts = pool[: args.n_examples]
         style = "concise" if args.kind == "concise" else "generic"
-        # sampled from the suspect model *before* any modification: well-terminated responses
-        print(f"[attack] sampling {len(prompts)} attacker responses ({style}, <= {args.gen_tokens} tokens) ...", flush=True)
-        examples = attacks.make_sft_examples(model, tok, prompts, style=style, max_new_tokens=args.gen_tokens, seed=args.seed)
+        mask_eos = args.kind in ("eosmask", "eosmask-repair")
+        if args.data_responses:
+            # a real instruction dataset with its own responses (no self-distillation, no tiny-set memorisation)
+            from .prompts import load_pairs
+
+            if not args.data:
+                raise SystemExit("--data-responses needs --data, e.g. --data hf:tatsu-lab/alpaca")
+            pairs = load_pairs(args.data, limit=args.n_examples, seed=args.seed)
+            examples = attacks.examples_from_pairs(tok, pairs, style=style, max_resp_tokens=args.max_resp_tokens)
+            print(f"[attack] {len(examples)} dataset examples from {args.data} ({style})", flush=True)
+        else:
+            # never train on the prompts reserved for quality evaluation
+            pool = load_prompts(args.data) if args.data else anchors["heldout_prompts"][QUALITY_N:]
+            prompts = pool[: args.n_examples]
+            # sampled from the suspect model *before* any modification: well-terminated responses
+            print(f"[attack] sampling {len(prompts)} attacker responses ({style}, <= {args.gen_tokens} tokens) ...", flush=True)
+            examples = attacks.make_sft_examples(model, tok, prompts, style=style, max_new_tokens=args.gen_tokens,
+                                                 seed=args.seed)
+        if args.eval_at and args.kind != "eosmask-repair":
+            # one long attack, evaluated at cumulative checkpoints (e.g. 300,1000,3000)
+            done = 0
+            for target in sorted(int(s) for s in args.eval_at.split(",")):
+                print(f"[attack] fine-tuning ({args.mode}) steps {done} -> {target}", flush=True)
+                model = attacks.sft_attack(model, tok, examples, steps=target - done, lr=args.lr, bs=args.bs,
+                                           mode=args.mode, mask_eos=mask_eos, seed=args.seed + done)
+                done = target
+                _evaluate(args, model, tok, anchors, f"{name}:step{done}", device)
+            if args.out:
+                _save(model, tok, args.out)
+            return
         print(f"[attack] {len(examples)} examples; fine-tuning ({args.mode}) for {args.steps} steps", flush=True)
         model = attacks.sft_attack(model, tok, examples, steps=args.steps, lr=args.lr, bs=args.bs, mode=args.mode,
-                                   mask_eos=args.kind in ("eosmask", "eosmask-repair"), seed=args.seed)
+                                   mask_eos=mask_eos, seed=args.seed)
         if args.kind == "eosmask-repair":
             # destroy-then-repair: stage 1 broke termination (EOS unsupervised); stage 2 re-teaches it on the same
             # data with EOS supervised. Does the watermark come back with the restored stop behaviour?
@@ -170,6 +207,7 @@ def cmd_quality(args):
     anchors = _load_anchors(args.anchors)
     _log(args, quality_report(model, tok, anchors["heldout_prompts"][: min(args.n, QUALITY_N)], args.ref_file,
                               name=args.name or args.model, max_new_tokens=args.max_new_tokens))
+    _bench(args, model, tok, args.name or args.model)
 
 
 def main():
@@ -189,6 +227,9 @@ def main():
                    help="ablation: take A's state at its stop position (default) or at a random response token")
     p.add_argument("--readout", default="eos", choices=["eos", "token"],
                    help="ablation: measure EOS log-odds (default) or a key-chosen ordinary token's log-odds")
+    p.add_argument("--pairs-per-bit", type=int, default=1,
+                   help="redundant coding: key pairs per bit, averaged at readout (noise / sqrt(k)); "
+                        "needs 2 * n_bits * k usable responses")
     p.add_argument("--out", required=True)
     _common(p)
     p.set_defaults(fn=cmd_build_anchors)
@@ -227,6 +268,14 @@ def main():
                         "(--repair-steps, EOS supervised), reporting after each stage")
     p.add_argument("--repair-steps", default="100,300",
                    help="eosmask-repair: cumulative repair steps at which to evaluate, e.g. 100,300")
+    p.add_argument("--eval-at", default=None,
+                   help="sft/concise/eosmask: cumulative steps at which to evaluate one long attack, e.g. 300,1000,3000 "
+                        "(overrides --steps)")
+    p.add_argument("--data-responses", action="store_true",
+                   help="fine-tune on the dataset's own responses (alpaca-style instruction/input/output or "
+                        "prompt/response) instead of responses sampled from the suspect model")
+    p.add_argument("--max-resp-tokens", type=int, default=256,
+                   help="--data-responses: skip dataset responses longer than this")
     p.add_argument("--mode", default="lora", choices=["lora", "full"])
     p.add_argument("--steps", type=int, default=300)
     p.add_argument("--lr", type=float, default=None)
@@ -241,6 +290,7 @@ def main():
     p.add_argument("--quality-ref", default=None, help="also run the quality report in memory against this reference file")
     p.add_argument("--quality-tokens", type=int, default=128)
     p.add_argument("--out", default=None, help="save the attacked model (several GB; usually not needed)")
+    _bench_args(p)
     _common(p)
     p.set_defaults(fn=cmd_attack)
 
@@ -250,6 +300,7 @@ def main():
     p.add_argument("--ref-file", required=True)
     p.add_argument("--n", type=int, default=64)
     p.add_argument("--max-new-tokens", type=int, default=128)
+    _bench_args(p)
     p.add_argument("--name", default=None)
     _common(p)
     p.set_defaults(fn=cmd_quality)

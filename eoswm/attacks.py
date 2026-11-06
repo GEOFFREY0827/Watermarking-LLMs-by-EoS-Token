@@ -100,12 +100,31 @@ def make_sft_examples(model, tok, prompts, style="generic", max_new_tokens=96, b
             stop = next((k for k, t in enumerate(toks) if t in eos_ids), len(toks))
             resp = toks[:stop]
             if style == "concise":
-                for k in range(3, len(resp)):
-                    if any(c in tok.decode([resp[k]]) for c in SENT_END):
-                        resp = resp[: k + 1]
-                        break
+                resp = _first_sentence(tok, resp)
             if len(resp) >= 2:
                 rows.append({"prompt_ids": pi, "resp_ids": resp})
+    return rows
+
+
+def _first_sentence(tok, resp):
+    for k in range(3, len(resp)):
+        if any(c in tok.decode([resp[k]]) for c in SENT_END):
+            return resp[: k + 1]
+    return resp
+
+
+def examples_from_pairs(tok, pairs, style="generic", max_resp_tokens=256):
+    """Attacker data from a real instruction dataset (its own responses, not the suspect model's).
+    Over-long responses are skipped, not truncated: a cut answer followed by EOS would teach early stopping."""
+    rows = []
+    for prompt, response in pairs:
+        resp = tok(response, add_special_tokens=False)["input_ids"]
+        if len(resp) > max_resp_tokens:
+            continue
+        if style == "concise":
+            resp = _first_sentence(tok, resp)
+        if len(resp) >= 2:
+            rows.append({"prompt_ids": prompt_ids(tok, prompt), "resp_ids": resp})
     return rows
 
 

@@ -8,6 +8,9 @@
 #   REUSE=1 KEY="my secret" GPUS=0,1,2,3 bash scripts/run_pipeline.sh
 #   # attacker fine-tunes on a real instruction dataset instead of the built-in prompts
 #   ATTACK_DATA=hf:tatsu-lab/alpaca bash scripts/run_pipeline.sh
+#   # long attack on the dataset's own responses, evaluated at checkpoints, plus downstream benchmarks
+#   REUSE=1 KEY=... GPUS=1,2 JOBS="sft-lora@0 sft-full@0" ATTACK_DATA=hf:tatsu-lab/alpaca DATA_RESPONSES=1 \
+#     N_EXAMPLES=20000 EVAL_AT=300,1000,3000 BENCH=mmlu,arc,gsm8k bash scripts/run_pipeline.sh
 # Attacked models are evaluated in memory and not written to disk.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,6 +25,11 @@ GPUS=${GPUS:-0}
 DEVICE_MAP=${DEVICE_MAP:-}
 REUSE=${REUSE:-0}
 ATTACK_DATA=${ATTACK_DATA:-}
+DATA_RESPONSES=${DATA_RESPONSES:-0}   # 1: fine-tune on the dataset's own responses
+N_EXAMPLES=${N_EXAMPLES:-1000}
+EVAL_AT=${EVAL_AT:-}                  # e.g. 300,1000,3000: one long attack, evaluated at each checkpoint
+BENCH=${BENCH:-}                      # e.g. mmlu,arc,gsm8k (needs `pip install datasets`)
+BENCH_N=${BENCH_N:-300}
 R=$OUT/results.jsonl
 A=$OUT/anchors.pt
 Q=$OUT/ref.pt
@@ -52,26 +60,31 @@ else
   # shellcheck disable=SC2086
   run embed --model "$MODEL" --anchors "$A" --out "$OUT/wm" --steps "$STEPS" --results "$R" ${EMBED_ARGS:-}
 fi
-run quality --model "$MODEL"  --anchors "$A" --ref-file "$Q" --name base        --results "$R"   # writes $Q once
-run quality --model "$OUT/wm" --anchors "$A" --ref-file "$Q" --name watermarked --results "$R"
+B=(); [[ -n "$BENCH" ]] && B=(--bench "$BENCH" --bench-n "$BENCH_N")
+run quality --model "$MODEL"  --anchors "$A" --ref-file "$Q" --name base        --results "$R" "${B[@]}"   # writes $Q once
+run quality --model "$OUT/wm" --anchors "$A" --ref-file "$Q" --name watermarked --results "$R" "${B[@]}"
 
 # ---- attacks, parallel over slots (each also reports quality, in memory) ---------------------
 DATA=(); [[ -n "$ATTACK_DATA" ]] && DATA=(--data "$ATTACK_DATA")
+[[ "$DATA_RESPONSES" == 1 ]] && DATA+=(--data-responses)
+DATA+=(--n-examples "$N_EXAMPLES")
+FT=(); [[ -n "$EVAL_AT" ]] && FT=(--eval-at "$EVAL_AT")
 job() {   # name[@seed], e.g. sft-lora@1
   local name=$1 base=${1%@*} seed=0
   [[ "$1" == *@* ]] && seed=${1#*@}
   case $base in
     rotate|quant8|quant4)
       run attack --model "$OUT/wm" --anchors "$A" --kind "$base" --name "attack:$name" \
-          --quality-ref "$Q" --results "$R" ;;
+          --quality-ref "$Q" --results "$R" "${B[@]}" ;;
     sft-lora|sft-full|concise-lora|eosmask-lora|eosmask-repair-lora|eosmask-repair-full)
       local kind=${base%-*} mode=${base##*-}
-      run attack --model "$OUT/wm" --anchors "$A" --kind "$kind" --mode "$mode" --steps "$ATTACK_STEPS" \
-          --repair-steps "${REPAIR_STEPS:-100,300}" \
-          --seed "$seed" "${DATA[@]}" --name "attack:$name" --quality-ref "$Q" --results "$R" ;;
+      run attack --model "$OUT/wm" --anchors "$A" --kind "$kind" --mode "$mode" --steps "$ATTACK_STEPS" --bs "${ATTACK_BS:-8}" \
+          --repair-steps "${REPAIR_STEPS:-100,300}" "${FT[@]}" \
+          --seed "$seed" "${DATA[@]}" --name "attack:$name" --quality-ref "$Q" --results "$R" "${B[@]}" ;;
     null-sibling)   # base + the same fine-tuning: must NOT verify; also the benign-fine-tune quality reference
-      run attack --model "$MODEL" --anchors "$A" --kind sft --mode lora --steps "$ATTACK_STEPS" \
-          --seed "$seed" "${DATA[@]}" --name "null:sibling-sft${name#null-sibling}" --quality-ref "$Q" --results "$R" ;;
+      run attack --model "$MODEL" --anchors "$A" --kind sft --mode lora --steps "$ATTACK_STEPS" --bs "${ATTACK_BS:-8}" \
+          "${FT[@]}" --seed "$seed" "${DATA[@]}" --name "null:sibling-sft${name#null-sibling}" \
+          --quality-ref "$Q" --results "$R" "${B[@]}" ;;
     *) echo "unknown job $name"; return 1 ;;
   esac
 }

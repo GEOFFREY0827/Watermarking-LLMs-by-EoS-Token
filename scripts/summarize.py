@@ -26,3 +26,11 @@ if qual:
     print("|---|---|---|---|")
     for r in qual:
         print(f"| {r['model']} | {r['avg_len']:.1f} | {r['stop_rate']:.2f} | {r['ref_nll']:.3f} |")
+
+bench = [r for r in rows if "bench_n" in r]
+if bench:
+    cols = sorted({k for r in bench for k in r if k.startswith("bench_") and k != "bench_n"})
+    print(f"\n| model | " + " | ".join(c[6:] for c in cols) + f" | (n={bench[0]['bench_n']} per benchmark) |")
+    print("|---|" + "---|" * (len(cols) + 1))
+    for r in bench:
+        print(f"| {r['model']} | " + " | ".join(f"{r[c]:.3f}" if c in r else "-" for c in cols) + " | |")

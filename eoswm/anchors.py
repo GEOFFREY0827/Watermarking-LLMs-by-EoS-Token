@@ -101,7 +101,7 @@ def random_pairs(rows, n, rng):
 
 def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = None, prompt_source="builtin",
                   max_new_tokens=64, stop_tau=0.5, n_nonkey_train=256, n_nonkey_eval=128,
-                  require_natural_stop=True, bs=16, device=None, position="stop", readout="eos"):
+                  require_natural_stop=True, bs=16, device=None, position="stop", readout="eos", pairs_per_bit=1):
     """position: 'stop' (A's stop-decision position) or 'random' (a random response token of A).
     readout:  'eos' (EOS log-odds at B) or 'token' (log-odds of a key-chosen ordinary token at B).
     Both ablations draw from their own key-derived stream, so every variant shares the same pairs."""
@@ -117,7 +117,9 @@ def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = No
     prompts = [prompts[i] for i in order]
     rng = key_rng(key, "pairs")
 
-    n_resp_key, n_resp_tr, n_resp_ev = 2 * n_bits, 96, 64
+    # redundant coding: every bit is carried by `pairs_per_bit` key pairs whose readouts are averaged
+    n_pairs = n_bits * pairs_per_bit
+    n_resp_key, n_resp_tr, n_resp_ev = 2 * n_pairs, 96, 64
     need = n_resp_key + n_resp_tr + n_resp_ev
     rows, used = [], 0
     while len(rows) < need and used < len(prompts):
@@ -130,7 +132,7 @@ def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = No
         raise RuntimeError(f"only {len(rows)} usable responses (need {need}); lower --stop-tau or add prompts")
 
     key_rows, tr_rows, ev_rows = rows[:n_resp_key], rows[n_resp_key:n_resp_key + n_resp_tr], rows[n_resp_key + n_resp_tr:need]
-    key_pairs = [make_pair(key_rows[i], key_rows[n_bits + i], rng) for i in range(n_bits)]
+    key_pairs = [make_pair(key_rows[i], key_rows[n_pairs + i], rng) for i in range(n_pairs)]
     nk_train = random_pairs(tr_rows, n_nonkey_train, rng)
     nk_eval = random_pairs(ev_rows, n_nonkey_eval, rng)
 
@@ -153,6 +155,8 @@ def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = No
         "readout": readout,
         "eos_ids": eos_ids,
         "bits": balanced_bits(key, n_bits),
+        "pairs_per_bit": pairs_per_bit,
+        "bit_index": [i % n_bits for i in range(n_pairs)],   # key pair i carries bit bit_index[i]
         "key_pairs": key_pairs,
         "key_delta0": d0(key_pairs),
         "nonkey_train_pairs": nk_train,
