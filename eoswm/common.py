@@ -171,22 +171,33 @@ def eos_logodds(logits: torch.Tensor, eos_ids: Sequence[int]) -> torch.Tensor:
     return le - l1m
 
 
+def target_logodds(logits: torch.Tensor, targets: Sequence[Sequence[int]]) -> torch.Tensor:
+    """Row-wise log p(T_i) - log(1 - p(T_i)), where T_i is the token set of row i."""
+    if all(list(t) == list(targets[0]) for t in targets):
+        return eos_logodds(logits, targets[0])
+    lp = F.log_softmax(logits.float(), dim=-1)
+    le = torch.stack([torch.logsumexp(lp[i, list(t)], dim=-1) for i, t in enumerate(targets)])
+    return le - torch.log((-torch.expm1(le)).clamp_min(1e-12))
+
+
 def patch_delta(model, layers, layer_idx: int, eos_ids, pairs: Sequence[dict], pad_id: int, device) -> torch.Tensor:
-    """Causal effect of patching A's stop-position state into B:
+    """Causal effect of patching A's state (at pos_A, usually the stop position) into B:
 
-        delta = logodds_EOS(B | h_L[B, pos_B] <- h_L[A, pos_A]) - logodds_EOS(B)
+        delta = logodds_T(B | h_L[B, pos_B] <- h_L[A, pos_A]) - logodds_T(B)
 
+    T = EOS by default, or the pair's own `target` token set (readout ablation).
     Gradients flow when called outside torch.no_grad().
     """
+    targets = [p.get("target", eos_ids) for p in pairs]
     ids_a, mask_a = pad_batch([p["ids_A"] for p in pairs], pad_id, device)
     pos_a = torch.tensor([p["pos_A"] for p in pairs], device=device)
     ids_b, mask_b = pad_batch([p["ids_B"] for p in pairs], pad_id, device)
     pos_b = torch.tensor([p["pos_B"] for p in pairs], device=device)
 
     h_a, _ = cache_hidden(model, layers, layer_idx, ids_a, mask_a, pos_a)
-    clean = eos_logodds(logits_at(model, ids_b, mask_b, pos_b), eos_ids)
+    clean = target_logodds(logits_at(model, ids_b, mask_b, pos_b), targets)
     with patch_hidden(layers, layer_idx, pos_b, h_a):
-        patched = eos_logodds(logits_at(model, ids_b, mask_b, pos_b), eos_ids)
+        patched = target_logodds(logits_at(model, ids_b, mask_b, pos_b), targets)
     return (patched - clean).to(device)
 
 

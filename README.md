@@ -125,6 +125,26 @@ python -m eoswm.cli quality --model runs/x/wm --anchors runs/x/anchors.pt --ref-
 `eosmask-lora`（复现 pad==eos 掩码 bug，EOS 不再被监督）。
 零假设：`base` 与 `null:sibling-sft`（基座做同样的微调）。
 
+## 4b. EOS 消融：EOS 到底起不起作用
+
+```bash
+KEY="your-secret-key" GPUS=0,1,2,3 CLEANUP=1 bash scripts/run_ablation.sh
+python scripts/summarize_ablation.py runs/ablation-Qwen2.5-1.5B-Instruct
+```
+
+同一把密钥、同一批回复和键对，只改变两处和 EOS 有关的选择（`build-anchors --position/--readout`）：
+
+| 版本 | A 的移植位置 | 读出量 |
+|---|---|---|
+| `stop-eos`（本方法） | 停止决策位置 | EOS log-odds |
+| `random-eos` | 回复中的随机 token | EOS log-odds |
+| `stop-token` | 停止决策位置 | 密钥选出的普通 token（B 位置基座 top-50 候选中，排除 EOS） |
+| `random-token` | 随机 token | 普通 token（完全不涉及 EOS） |
+
+每个版本在一张卡上跑完整流程，默认攻击为 `quant4`、`sft-lora` × 3 个种子、`sft-full`、`concise`、`eosmask` 和兄弟模型
+（用 `ABL_JOBS` 修改）。汇总表报告校正后的 BER，以及 **z = 间隔 / 噪声**（预测 BER = Φ(−z)）。64 比特的 BER 抽样误差很大，
+比较时以 z 为主。磁盘：每个版本保存一个水印模型（1.5B 约 3 GB），`CLEANUP=1` 会在该版本结束后删除它，`ROOT=` 可以换到大磁盘。
+
 ## 5. 冒烟测试结果（仅验证流程，**不是**科学结论）
 
 22 万参数的随机初始化 Qwen2、16 比特、强制停止的锚点、CPU：

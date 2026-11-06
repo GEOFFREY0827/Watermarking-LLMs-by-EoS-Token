@@ -65,7 +65,30 @@ def make_pair(a, b, rng):
     lo, hi = max(1, int(0.3 * rl)), max(2, int(0.7 * rl))
     cut = int(rng.integers(lo, hi + 1))
     ids_b = b["ids"][: b["n_prompt"] + cut]
-    return {"ids_A": a["ids"], "pos_A": len(a["ids"]) - 1, "ids_B": ids_b, "pos_B": len(ids_b) - 1}
+    return {"ids_A": a["ids"], "pos_A": len(a["ids"]) - 1, "n_prompt_A": a["n_prompt"],
+            "ids_B": ids_b, "pos_B": len(ids_b) - 1}
+
+
+def move_to_random_position(pairs, rng):
+    """Position ablation: take A's state at a random response token (not the stop position).
+    The residual stream is causal, so the state at that position only sees A's prefix."""
+    for p in pairs:
+        lo, hi = p["n_prompt_A"], len(p["ids_A"]) - 2   # response tokens except the last one
+        if hi >= lo:
+            p["pos_A"] = int(rng.integers(lo, hi + 1))
+
+
+@torch.no_grad()
+def choose_target_tokens(model, pairs, eos_ids, pad_id, device, rng, k=50, bs=16):
+    """Readout ablation: per pair, a key-chosen ordinary token among the base model's top-k candidates at
+    B's position (EOS excluded), so the readout has a dynamic range comparable to EOS."""
+    for c in chunks(pairs, bs):
+        ids, mask = pad_batch([p["ids_B"] for p in c], pad_id, device)
+        pos = torch.tensor([p["pos_B"] for p in c], device=device)
+        top = logits_at(model, ids, mask, pos).topk(k, dim=-1).indices.tolist()
+        for p, cand in zip(c, top):
+            cand = [t for t in cand if t not in eos_ids]
+            p["target"] = [int(cand[int(rng.integers(len(cand)))])]
 
 
 def random_pairs(rows, n, rng):
@@ -78,7 +101,11 @@ def random_pairs(rows, n, rng):
 
 def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = None, prompt_source="builtin",
                   max_new_tokens=64, stop_tau=0.5, n_nonkey_train=256, n_nonkey_eval=128,
-                  require_natural_stop=True, bs=16, device=None):
+                  require_natural_stop=True, bs=16, device=None, position="stop", readout="eos"):
+    """position: 'stop' (A's stop-decision position) or 'random' (a random response token of A).
+    readout:  'eos' (EOS log-odds at B) or 'token' (log-odds of a key-chosen ordinary token at B).
+    Both ablations draw from their own key-derived stream, so every variant shares the same pairs."""
+    assert position in ("stop", "random") and readout in ("eos", "token")
     device = device or input_device(model)
     eos_ids = eos_token_ids(model, tok)
     n_layers = model.config.num_hidden_layers
@@ -109,11 +136,21 @@ def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = No
 
     layers = get_layers(model)
     pad = tok.pad_token_id
+    if position == "random":
+        abl = key_rng(key, "ablation-position")
+        for pairs in (key_pairs, nk_train, nk_eval):
+            move_to_random_position(pairs, abl)
+    if readout == "token":
+        abl = key_rng(key, "ablation-readout")
+        for pairs in (key_pairs, nk_train, nk_eval):
+            choose_target_tokens(model, pairs, eos_ids, pad, device, abl)
     d0 = lambda pairs: patch_delta_all(model, layers, layer, eos_ids, pairs, pad, device).tolist()
 
     return {
         "commitment": commitment(key),
         "layer": layer,
+        "position": position,
+        "readout": readout,
         "eos_ids": eos_ids,
         "bits": balanced_bits(key, n_bits),
         "key_pairs": key_pairs,

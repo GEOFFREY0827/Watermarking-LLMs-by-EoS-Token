@@ -57,23 +57,27 @@ run quality --model "$OUT/wm" --anchors "$A" --ref-file "$Q" --name watermarked 
 
 # ---- attacks, parallel over slots (each also reports quality, in memory) ---------------------
 DATA=(); [[ -n "$ATTACK_DATA" ]] && DATA=(--data "$ATTACK_DATA")
-job() {
-  local name=$1
-  case $name in
+job() {   # name[@seed], e.g. sft-lora@1
+  local name=$1 base=${1%@*} seed=0
+  [[ "$1" == *@* ]] && seed=${1#*@}
+  case $base in
     rotate|quant8|quant4)
-      run attack --model "$OUT/wm" --anchors "$A" --kind "$name" --name "attack:$name" \
+      run attack --model "$OUT/wm" --anchors "$A" --kind "$base" --name "attack:$name" \
           --quality-ref "$Q" --results "$R" ;;
     sft-lora|sft-full|concise-lora|eosmask-lora)
-      local kind=${name%-*} mode=${name##*-}
+      local kind=${base%-*} mode=${base##*-}
       run attack --model "$OUT/wm" --anchors "$A" --kind "$kind" --mode "$mode" --steps "$ATTACK_STEPS" \
-          "${DATA[@]}" --name "attack:$name" --quality-ref "$Q" --results "$R" ;;
+          --seed "$seed" "${DATA[@]}" --name "attack:$name" --quality-ref "$Q" --results "$R" ;;
     null-sibling)   # base + the same fine-tuning: must NOT verify; also the benign-fine-tune quality reference
       run attack --model "$MODEL" --anchors "$A" --kind sft --mode lora --steps "$ATTACK_STEPS" \
-          "${DATA[@]}" --name "null:sibling-sft" --quality-ref "$Q" --results "$R" ;;
+          --seed "$seed" "${DATA[@]}" --name "null:sibling-sft${name#null-sibling}" --quality-ref "$Q" --results "$R" ;;
+    *) echo "unknown job $name"; return 1 ;;
   esac
 }
 
-JOBS=(rotate quant8 quant4 sft-lora sft-full concise-lora eosmask-lora null-sibling)
+# JOBS="sft-lora@0 sft-lora@1 quant4" overrides the default list
+if [[ -n "${JOBS:-}" ]]; then read -ra JOBS <<< "$JOBS"
+else JOBS=(rotate quant8 quant4 sft-lora sft-full concise-lora eosmask-lora null-sibling); fi
 declare -A SLOTPID PID2JOB
 free_slot() {   # first slot whose job has finished (or never started); blocks until one is free
   while true; do
@@ -99,3 +103,4 @@ done
 if (( ${#failed[@]} )); then echo "FAILED jobs: ${failed[*]} (see $OUT/logs/)"; fi
 
 python scripts/summarize.py "$R"
+if [[ "${CLEANUP:-0}" == 1 ]]; then rm -rf "$OUT/wm"; echo "removed $OUT/wm (CLEANUP=1)"; fi

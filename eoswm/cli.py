@@ -52,12 +52,14 @@ def cmd_build_anchors(args):
     model, tok, device = _load(args, args.model)
     anchors = build_anchors(model, tok, args.key, n_bits=args.n_bits, layer=args.layer, prompt_source=args.prompts,
                             max_new_tokens=args.max_new_tokens, stop_tau=args.stop_tau,
-                            require_natural_stop=not args.allow_forced_stop, device=device)
+                            require_natural_stop=not args.allow_forced_stop, device=device,
+                            position=args.position, readout=args.readout)
     anchors["base_model"] = args.model
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(anchors, args.out)
     d0 = torch.tensor(anchors["key_delta0"])
-    print(f"anchors -> {args.out} | layer {anchors['layer']} | {len(anchors['bits'])} bits | "
+    print(f"anchors -> {args.out} | position {args.position} | readout {args.readout} | "
+          f"layer {anchors['layer']} | {len(anchors['bits'])} bits | "
           f"natural-stop rate {anchors['natural_stop_rate']:.2f} | base transplant effect "
           f"mean {d0.mean():.2f} sd {d0.std():.2f} | commitment {anchors['commitment']}")
 
@@ -155,6 +157,10 @@ def main():
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--stop-tau", type=float, default=0.5)
     p.add_argument("--allow-forced-stop", action="store_true", help="for untrained smoke-test models only")
+    p.add_argument("--position", default="stop", choices=["stop", "random"],
+                   help="ablation: take A's state at its stop position (default) or at a random response token")
+    p.add_argument("--readout", default="eos", choices=["eos", "token"],
+                   help="ablation: measure EOS log-odds (default) or a key-chosen ordinary token's log-odds")
     p.add_argument("--out", required=True)
     _common(p)
     p.set_defaults(fn=cmd_build_anchors)
