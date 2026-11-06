@@ -90,10 +90,25 @@ def cmd_verify(args):
     _log(args, report(model, tok, _load_anchors(args.anchors), name=args.name or args.model, device=device))
 
 
+def _evaluate(args, model, tok, anchors, name, device, extra=None):
+    """Watermark readout + (optionally) in-memory quality report for one (attacked) model."""
+    from .watermark import report
+
+    for k, v in (extra or {}).items():
+        print(f"{k} = {v:.4g}")
+    res = report(model, tok, anchors, name=name, device=device)
+    res.update(extra or {})
+    _log(args, res)
+    if args.quality_ref:  # evaluate the attacked model in memory: no multi-GB checkpoint on disk
+        from .quality import quality_report
+
+        _log(args, quality_report(model, tok, anchors["heldout_prompts"][:QUALITY_N], args.quality_ref,
+                                  name=name, max_new_tokens=args.quality_tokens))
+
+
 def cmd_attack(args):
     from . import attacks
     from .prompts import load_prompts
-    from .watermark import report
 
     if args.kind == "rotate" and args.dtype == "auto":
         args.dtype = "fp32"  # in bf16 the rotation itself adds visible rounding error over the layers
@@ -110,16 +125,31 @@ def cmd_attack(args):
         extra["static_probe_cos_before"] = before
         extra["static_probe_cos_after"], _ = attacks.static_probe_cosine(model, anchors, tok, direction)
         del ref
-    elif args.kind in ("sft", "concise", "eosmask"):
+    elif args.kind in ("sft", "concise", "eosmask", "eosmask-repair"):
         # never train on the prompts reserved for quality evaluation
         pool = load_prompts(args.data) if args.data else anchors["heldout_prompts"][QUALITY_N:]
         prompts = pool[: args.n_examples]
         style = "concise" if args.kind == "concise" else "generic"
+        # sampled from the suspect model *before* any modification: well-terminated responses
         print(f"[attack] sampling {len(prompts)} attacker responses ({style}, <= {args.gen_tokens} tokens) ...", flush=True)
         examples = attacks.make_sft_examples(model, tok, prompts, style=style, max_new_tokens=args.gen_tokens, seed=args.seed)
         print(f"[attack] {len(examples)} examples; fine-tuning ({args.mode}) for {args.steps} steps", flush=True)
         model = attacks.sft_attack(model, tok, examples, steps=args.steps, lr=args.lr, bs=args.bs, mode=args.mode,
-                                   mask_eos=args.kind == "eosmask", seed=args.seed)
+                                   mask_eos=args.kind in ("eosmask", "eosmask-repair"), seed=args.seed)
+        if args.kind == "eosmask-repair":
+            # destroy-then-repair: stage 1 broke termination (EOS unsupervised); stage 2 re-teaches it on the same
+            # data with EOS supervised. Does the watermark come back with the restored stop behaviour?
+            _evaluate(args, model, tok, anchors, f"{name}:broken", device)
+            done = 0
+            for target in sorted(int(s) for s in args.repair_steps.split(",")):
+                print(f"[attack] repair: EOS-supervised fine-tuning ({args.mode}) steps {done} -> {target}", flush=True)
+                model = attacks.sft_attack(model, tok, examples, steps=target - done, lr=args.lr, bs=args.bs,
+                                           mode=args.mode, mask_eos=False, seed=args.seed + 1 + done)
+                done = target
+                _evaluate(args, model, tok, anchors, f"{name}:repair{done}", device)
+            if args.out:
+                _save(model, tok, args.out)
+            return
     elif args.kind == "quant8":
         model = attacks.fake_quantize(model, n_bits=8)
     elif args.kind == "quant4":
@@ -128,16 +158,7 @@ def cmd_attack(args):
         model = attacks.fake_quantize(model, n_bits=4)
     else:
         raise ValueError(args.kind)
-    for k, v in extra.items():
-        print(f"{k} = {v:.4g}")
-    res = report(model, tok, anchors, name=name, device=device)
-    res.update(extra)
-    _log(args, res)
-    if args.quality_ref:  # evaluate the attacked model in memory: no multi-GB checkpoint on disk
-        from .quality import quality_report
-
-        _log(args, quality_report(model, tok, anchors["heldout_prompts"][:QUALITY_N], args.quality_ref,
-                                  name=name, max_new_tokens=args.quality_tokens))
+    _evaluate(args, model, tok, anchors, name, device, extra)
     if args.out:
         _save(model, tok, args.out)
 
@@ -200,8 +221,12 @@ def main():
     p.add_argument("--model", required=True)
     p.add_argument("--anchors", required=True)
     p.add_argument("--kind", required=True,
-                   choices=["rotate", "sft", "concise", "eosmask", "quant8", "quant4", "quant4-tensor"],
-                   help="quant8: per-tensor int8; quant4: int4 with groups of 128; quant4-tensor: per-tensor int4")
+                   choices=["rotate", "sft", "concise", "eosmask", "eosmask-repair", "quant8", "quant4", "quant4-tensor"],
+                   help="quant8: per-tensor int8; quant4: int4 with groups of 128; quant4-tensor: per-tensor int4; "
+                        "eosmask-repair: break termination (--steps, EOS unsupervised), then re-teach it "
+                        "(--repair-steps, EOS supervised), reporting after each stage")
+    p.add_argument("--repair-steps", default="100,300",
+                   help="eosmask-repair: cumulative repair steps at which to evaluate, e.g. 100,300")
     p.add_argument("--mode", default="lora", choices=["lora", "full"])
     p.add_argument("--steps", type=int, default=300)
     p.add_argument("--lr", type=float, default=None)

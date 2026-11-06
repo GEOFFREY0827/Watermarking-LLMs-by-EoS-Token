@@ -64,9 +64,10 @@ job() {   # name[@seed], e.g. sft-lora@1
     rotate|quant8|quant4)
       run attack --model "$OUT/wm" --anchors "$A" --kind "$base" --name "attack:$name" \
           --quality-ref "$Q" --results "$R" ;;
-    sft-lora|sft-full|concise-lora|eosmask-lora)
+    sft-lora|sft-full|concise-lora|eosmask-lora|eosmask-repair-lora|eosmask-repair-full)
       local kind=${base%-*} mode=${base##*-}
       run attack --model "$OUT/wm" --anchors "$A" --kind "$kind" --mode "$mode" --steps "$ATTACK_STEPS" \
+          --repair-steps "${REPAIR_STEPS:-100,300}" \
           --seed "$seed" "${DATA[@]}" --name "attack:$name" --quality-ref "$Q" --results "$R" ;;
     null-sibling)   # base + the same fine-tuning: must NOT verify; also the benign-fine-tune quality reference
       run attack --model "$MODEL" --anchors "$A" --kind sft --mode lora --steps "$ATTACK_STEPS" \

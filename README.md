@@ -123,7 +123,9 @@ python -m eoswm.cli quality --model runs/x/wm --anchors runs/x/anchors.pt --ref-
 攻击：`rotate`（保函数的残差流正交旋转，默认在 fp32 下做，报告 top-1 一致率）、`quant8`（逐张量 int8）、
 `quant4`（int4，每 128 个权重一组；`quant4-tensor` 为逐张量 int4，会直接破坏模型）、`sft-lora` / `sft-full`
 （攻击者自采样数据做 LoRA / 全参数 SFT）、`concise-lora`（只保留第一句话再 SFT，改变终止和长度行为）、
-`eosmask-lora`（复现 pad==eos 掩码 bug，EOS 不再被监督）。
+`eosmask-lora`（复现 pad==eos 掩码 bug，EOS 不再被监督）、
+`eosmask-repair-lora` / `eosmask-repair-full`（**先破坏、再修复**：先用不监督 EOS 的微调打乱停止能力，再用同一批数据、
+正常监督 EOS 把停止能力教回来；在破坏后以及修复的每个检查点（`REPAIR_STEPS`，默认 `100,300`）分别报告水印和质量）。
 零假设：`base` 与 `null:sibling-sft`（基座做同样的微调）。
 
 ## 4b. EOS 消融：EOS 到底起不起作用

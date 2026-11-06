@@ -7,6 +7,7 @@ bit over the per-pair noise. Predicted BER = Phi(-z). z is far less noisy than a
 """
 import json
 import math
+import re
 import os
 import statistics as st
 import sys
@@ -22,6 +23,11 @@ def load(v):
         return None
     rows = [json.loads(line) for line in open(path) if line.strip()]
     return {r["model"]: r for r in rows if "BER" in r}, {r["model"]: r for r in rows if "ref_nll" in r}
+
+
+def strip_seed(name):
+    """attack:sft-lora@1 -> attack:sft-lora ; attack:eosmask-repair-lora@0:repair100 -> ...-lora:repair100"""
+    return re.sub(r"@\d+", "", name)
 
 
 def z(r):
@@ -49,7 +55,7 @@ groups = defaultdict(lambda: defaultdict(list))
 for v in present:
     for name, r in data[v][0].items():
         if name.startswith(("attack:", "null:")):
-            groups[name.split("@")[0]][v].append(r)
+            groups[strip_seed(name)][v].append(r)
 
 
 def cell(rs, f, fmt):
@@ -72,11 +78,11 @@ for title, f, fmt in [("BER after drift correction", lambda r: r["BER_corrected"
 print("\n## Quality after attack (ref_nll)\n")
 print("| attack | " + " | ".join(present) + " |")
 print("|---|" + "---|" * len(present))
-names = sorted({n.split("@")[0] for v in present for n in data[v][1] if n.startswith(("attack:", "null:"))})
+names = sorted({strip_seed(n) for v in present for n in data[v][1] if n.startswith(("attack:", "null:"))})
 for name in names:
     cells = []
     for v in present:
-        rs = [r for n, r in data[v][1].items() if n.split("@")[0] == name]
+        rs = [r for n, r in data[v][1].items() if strip_seed(n) == name]
         cells.append(cell(rs, lambda r: r["ref_nll"], ".3f"))
     print(f"| {name} | " + " | ".join(cells) + " |")
 print(f"\npredicted BER for z = 1, 2, 3: {', '.join(f'{0.5 * math.erfc(k / math.sqrt(2)):.3f}' for k in (1, 2, 3))}")
