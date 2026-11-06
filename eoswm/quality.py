@@ -6,12 +6,12 @@ import os
 
 import torch
 
-from .common import chunks, eos_token_ids, pad_batch, prompt_ids
+from .common import chunks, eos_token_ids, input_device, pad_batch, prompt_ids
 
 
 @torch.no_grad()
 def greedy_responses(model, tok, prompts, max_new_tokens=128, bs=16):
-    device = next(model.parameters()).device
+    device = input_device(model)
     eos_ids, pad = eos_token_ids(model, tok), tok.pad_token_id
     rows = []
     for chunk in chunks(prompts, bs):
@@ -34,7 +34,7 @@ def greedy_responses(model, tok, prompts, max_new_tokens=128, bs=16):
 @torch.no_grad()
 def nll_on(model, tok, rows, bs=8):
     """Mean per-token NLL of reference responses (incl. their stop token when they stopped)."""
-    device = next(model.parameters()).device
+    device = input_device(model)
     eos_ids = eos_token_ids(model, tok)
     stop = tok.eos_token_id if tok.eos_token_id in eos_ids else eos_ids[0]
     tot, n = 0.0, 0

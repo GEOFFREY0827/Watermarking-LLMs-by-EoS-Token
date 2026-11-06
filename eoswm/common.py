@@ -6,6 +6,7 @@ from typing import Iterable, Sequence
 
 import torch
 import torch.nn.functional as F
+import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -24,14 +25,21 @@ def pick_dtype(name: str | None, device: torch.device) -> torch.dtype:
     return {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[name]
 
 
-def load_model(path: str, device: torch.device, dtype: torch.dtype):
-    try:
-        model = AutoModelForCausalLM.from_pretrained(path, dtype=dtype)
-    except TypeError:  # older transformers
-        model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=dtype)
-    model.to(device)
+def load_model(path: str, device: torch.device, dtype: torch.dtype, device_map: str | None = None):
+    """device_map='auto' shards large models over all visible GPUs (inputs then go to the embedding's device)."""
+    # transformers >= 4.56 takes `dtype`; older versions silently ignore it and need `torch_dtype`
+    major, minor = (int(x) for x in transformers.__version__.split(".")[:2])
+    kw = "dtype" if (major, minor) >= (4, 56) else "torch_dtype"
+    extra = {"device_map": device_map} if device_map else {}
+    model = AutoModelForCausalLM.from_pretrained(path, **{kw: dtype}, **extra)
+    if not device_map:
+        model.to(device)
     model.eval()
     return model
+
+
+def input_device(model) -> torch.device:
+    return model.get_input_embeddings().weight.device
 
 
 def load_tokenizer(path: str):
@@ -135,7 +143,7 @@ def patch_hidden(layers, layer_idx: int, pos: torch.Tensor, values: torch.Tensor
     def hook(mod, inp, out):
         h = _unwrap(out).clone()
         rows = torch.arange(h.shape[0], device=h.device)
-        h[rows, pos] = values.to(h.dtype)
+        h[rows, pos] = values.to(device=h.device, dtype=h.dtype)
         return _rewrap(out, h)
 
     handle = layers[layer_idx].register_forward_hook(hook)
@@ -169,7 +177,7 @@ def patch_delta(model, layers, layer_idx: int, eos_ids, pairs: Sequence[dict], p
     clean = eos_logodds(logits_at(model, ids_b, mask_b, pos_b), eos_ids)
     with patch_hidden(layers, layer_idx, pos_b, h_a):
         patched = eos_logodds(logits_at(model, ids_b, mask_b, pos_b), eos_ids)
-    return patched - clean
+    return (patched - clean).to(device)
 
 
 @torch.no_grad()

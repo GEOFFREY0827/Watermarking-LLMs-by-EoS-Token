@@ -45,7 +45,11 @@ b̂ᵢ = [ xᵢ > median(x) ]
 L = softplus(m − sᵢ·xᵢ)            # 键对：比特 1 推高、比特 0 压低 (sᵢ = ±1)
   + λ_spec · E[x_j²]               # 非键对：其余 transplant 必须保持自然（特异性）
   + λ_kl   · KL(p_base ‖ p_model)  # 正常（不 patch）输出不变
+  + λ_eos  · E[(logodds_EOS − logodds_EOS^base)²]   # 正常位置的停止决策不变
 ```
+
+最后一项是专门加的：只用 KL 时，约束被摊到整个词表上，EOS 这一个 token 的概率仍可能漂移
+（冒烟测试中观察到停止率从 0 变成 1）。
 
 **为什么用 patching 做验证**
 1. **天然抗旋转/置换**：攻击者把残差流旋转为 h·Q，A 与 B 的状态同时被旋转，后续层自动抵消，读出不变（冒烟测试中验证：logits 差 4.7e-6，BER 完全相同；而静态余弦读出从 0.65 掉到 0.05）。
@@ -54,17 +58,35 @@ L = softplus(m − sᵢ·xᵢ)            # 键对：比特 1 推高、比特 0 
 
 ## 3. 快速开始
 
+**环境**：transformers 5.x 需要 PyTorch ≥ 2.6。已在两套版本组合上通过冒烟测试：
+`torch 2.15 + transformers 5.22 + peft 0.21`，以及 `transformers 4.57 + peft 0.17`。
+
 ```bash
+# 推荐：新建环境
+conda create -n eoswm python=3.10 -y && conda activate eoswm
+pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+
+# 或者：在已有的 torch 2.5 环境里，改用 transformers 4.x
+pip install "transformers>=4.45,<5" "peft>=0.12,<0.18" numpy
+
 python tests/smoke_test.py            # CPU，约 1 分钟；随机初始化的小模型，只检查流程
 ```
 
-在 RTX 4060（8 GB）上跑完整实验（默认 Qwen2.5-0.5B-Instruct，bf16 + LoRA）：
+完整实验（默认 Qwen2.5-1.5B-Instruct，bf16 + LoRA；攻击实验按 GPU 并行，每张卡同时只跑一个任务）：
 
 ```bash
-KEY="your-secret-key" bash scripts/run_pipeline.sh
-python scripts/summarize.py runs/qwen2.5-0.5b/results.jsonl
+KEY="your-secret-key" GPUS=0,1,2,3 bash scripts/run_pipeline.sh
+python scripts/summarize.py runs/Qwen2.5-1.5B-Instruct/results.jsonl
 ```
+
+| 模型 | 单张 3090（24 GB） | 建议 |
+|---|---|---|
+| Qwen2.5-0.5B / 1.5B-Instruct | 嵌入和全参数微调攻击都放得下 | 先用它们快速迭代 |
+| Qwen2.5-3B-Instruct | LoRA 嵌入可以；全参数攻击可能需要调小 `--bs` | |
+| Qwen2.5-7B-Instruct | 需要切分到多卡：`DEVICE_MAP=auto GPUS=0,1` | 此时各任务依次运行 |
+
+日志在 `runs/<model>/logs/`。额外参数可以通过 `ANCHOR_ARGS`、`EMBED_ARGS` 传入，例如 `EMBED_ARGS="--lam-eos 5"`。
 
 单独的命令：
 
@@ -90,8 +112,9 @@ python -m eoswm.cli quality --model runs/x/wm --anchors runs/x/anchors.pt --ref-
 | `avg_len` / `stop_rate` | 留出 prompt 上的贪心生成长度、自然停止比例 | 与基座接近 |
 | `ref_nll` | 基座回复（含停止 token）在该模型下的 NLL | 与基座接近 |
 
-攻击：`rotate`（保函数的残差流正交旋转）、`quant8/4`（逐张量对称伪量化）、`sft`（攻击者自采样数据 SFT）、
-`concise`（只保留第一句话再 SFT，改变终止/长度行为）、`eosmask`（复现 pad==eos 掩码 bug，EOS 不再被监督）。
+攻击：`rotate`（保函数的残差流正交旋转）、`quant8/4`（逐张量对称伪量化）、`sft-lora` / `sft-full`
+（攻击者自采样数据做 LoRA / 全参数 SFT）、`concise-lora`（只保留第一句话再 SFT，改变终止和长度行为）、
+`eosmask-lora`（复现 pad==eos 掩码 bug，EOS 不再被监督）。
 零假设：`base` 与 `null:sibling-sft`（基座做同样的微调）。
 
 ## 5. 冒烟测试结果（仅验证流程，**不是**科学结论）

@@ -7,18 +7,20 @@ import os
 
 import torch
 
-from .common import load_model, load_tokenizer, pick_device, pick_dtype
+from .common import input_device, load_model, load_tokenizer, pick_device, pick_dtype
 
 
 def _common(p):
     p.add_argument("--device", default=None)
     p.add_argument("--dtype", default="auto", choices=["auto", "bf16", "fp16", "fp32"])
+    p.add_argument("--device-map", default=None, help="'auto' to shard a large model over all visible GPUs")
     p.add_argument("--results", default=None, help="append a JSON line with the result to this file")
 
 
 def _load(args, path):
     device = pick_device(args.device)
-    return load_model(path, device, pick_dtype(args.dtype, device)), load_tokenizer(path), device
+    model = load_model(path, device, pick_dtype(args.dtype, device), device_map=args.device_map)
+    return model, load_tokenizer(path), input_device(model)
 
 
 def _log(args, res):
@@ -57,7 +59,8 @@ def cmd_embed(args):
     model, tok, device = _load(args, args.model)
     anchors = torch.load(args.anchors)
     model = embed_watermark(model, tok, anchors, steps=args.steps, lr=args.lr, bs=args.bs, margin=args.margin,
-                            lam_spec=args.lam_spec, lam_kl=args.lam_kl, lora_r=args.lora_r, device=device)
+                            lam_spec=args.lam_spec, lam_kl=args.lam_kl, lam_eos=args.lam_eos,
+                            lora_r=args.lora_r, device=device)
     _log(args, report(model, tok, anchors, name="watermarked", device=device))
     _save(model, tok, args.out)
 
@@ -140,6 +143,7 @@ def main():
     p.add_argument("--margin", type=float, default=3.0)
     p.add_argument("--lam-spec", type=float, default=1.0)
     p.add_argument("--lam-kl", type=float, default=1.0)
+    p.add_argument("--lam-eos", type=float, default=1.0, help="keep unpatched EOS log-odds equal to the base model")
     p.add_argument("--lora-r", type=int, default=16)
     _common(p)
     p.set_defaults(fn=cmd_embed)

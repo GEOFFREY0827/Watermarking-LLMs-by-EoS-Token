@@ -16,7 +16,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from .common import chunks, eos_logodds, eos_token_ids, get_layers, logits_at, pad_batch, patch_delta_all, prompt_ids
+from .common import chunks, eos_logodds, eos_token_ids, get_layers, input_device, logits_at, pad_batch, patch_delta_all, prompt_ids
 from .keys import balanced_bits, commitment, key_rng
 from .prompts import load_prompts
 
@@ -79,7 +79,7 @@ def random_pairs(rows, n, rng):
 def build_anchors(model, tok, key: str, n_bits: int = 64, layer: int | None = None, prompt_source="builtin",
                   max_new_tokens=64, stop_tau=0.5, n_nonkey_train=256, n_nonkey_eval=128,
                   require_natural_stop=True, bs=16, device=None):
-    device = device or next(model.parameters()).device
+    device = device or input_device(model)
     eos_ids = eos_token_ids(model, tok)
     n_layers = model.config.num_hidden_layers
     layer = int(round(0.6 * (n_layers - 1))) if layer is None else layer

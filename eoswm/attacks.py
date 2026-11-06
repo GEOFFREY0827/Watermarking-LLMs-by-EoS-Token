@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from peft import LoraConfig, get_peft_model
 
-from .common import chunks, eos_token_ids, get_layers, pad_batch, prompt_ids
+from .common import chunks, eos_token_ids, get_layers, input_device, pad_batch, prompt_ids
 from .watermark import LORA_TARGETS
 
 
@@ -80,7 +80,7 @@ def make_sft_examples(model, tok, prompts, style="generic", max_new_tokens=96, b
       generic  - unchanged responses (plain SFT)
       concise  - responses cut after the first sentence (changes termination/length behaviour)
     """
-    device = next(model.parameters()).device
+    device = input_device(model)
     eos_ids = eos_token_ids(model, tok)
     pad = tok.pad_token_id
     torch.manual_seed(seed)
@@ -112,7 +112,7 @@ def make_sft_examples(model, tok, prompts, style="generic", max_new_tokens=96, b
 def sft_attack(model, tok, examples, steps=300, lr=None, bs=8, mode="lora", mask_eos=False, seed=0, log_every=25):
     """Standard SFT on attacker data. mask_eos=True reproduces the pad==eos masking bug (EOS never
     supervised), a crude way to disrupt termination."""
-    device = next(model.parameters()).device
+    device = input_device(model)
     eos_ids = eos_token_ids(model, tok)
     stop = _stop_id(tok, eos_ids)
     rng = np.random.default_rng(seed)
@@ -176,7 +176,7 @@ def max_logit_diff(m1, m2, tok, prompts, device):
 def static_probe_cosine(model, anchors, tok, ref_direction=None):
     """A SEAL-style static readout: cosine between key-A stop states and a fixed direction.
     Returns (cosine, direction). Used to show that fixed-basis readouts break under rotation."""
-    device = next(model.parameters()).device
+    device = input_device(model)
     layers = get_layers(model)
     from .common import cache_hidden
 
