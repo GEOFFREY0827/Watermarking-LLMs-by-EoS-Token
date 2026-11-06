@@ -3,5 +3,7 @@ torch>=2.1
 transformers>=4.45
 peft>=0.12
 numpy
-# optional: prompts from Hugging Face datasets (--prompts hf:tatsu-lab/alpaca)
+# optional: real attacker data and downstream benchmarks (ATTACK_DATA=hf:..., BENCH=...)
+# with transformers 4.x pin both, otherwise pip pulls huggingface-hub>=1.0 and transformers fails to import:
+#   pip install "huggingface-hub>=0.34,<1.0" "datasets>=3,<4"
 # datasets
