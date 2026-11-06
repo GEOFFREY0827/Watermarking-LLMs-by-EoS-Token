@@ -56,7 +56,7 @@ def quality_report(model, tok, prompts, ref_file, name="model", max_new_tokens=1
     rows = greedy_responses(model, tok, prompts, max_new_tokens)
     if not os.path.exists(ref_file):
         torch.save(rows, ref_file)
-    ref = torch.load(ref_file)
+    ref = torch.load(ref_file, weights_only=True)
     res = {
         "model": name,
         "avg_len": sum(len(r["resp_ids"]) for r in rows) / len(rows),

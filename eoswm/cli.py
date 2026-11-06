@@ -30,6 +30,10 @@ def _log(args, res):
             f.write(json.dumps(res) + "\n")
 
 
+def _load_anchors(path):
+    return torch.load(path, weights_only=True)  # plain lists / dicts / numbers only
+
+
 def _save(model, tok, out):
     os.makedirs(out, exist_ok=True)
     model.save_pretrained(out)
@@ -57,7 +61,7 @@ def cmd_embed(args):
     from .watermark import embed_watermark, report
 
     model, tok, device = _load(args, args.model)
-    anchors = torch.load(args.anchors)
+    anchors = _load_anchors(args.anchors)
     model = embed_watermark(model, tok, anchors, steps=args.steps, lr=args.lr, bs=args.bs, margin=args.margin,
                             lam_spec=args.lam_spec, lam_kl=args.lam_kl, lam_eos=args.lam_eos,
                             lora_r=args.lora_r, device=device)
@@ -69,7 +73,7 @@ def cmd_verify(args):
     from .watermark import report
 
     model, tok, device = _load(args, args.model)
-    _log(args, report(model, tok, torch.load(args.anchors), name=args.name or args.model, device=device))
+    _log(args, report(model, tok, _load_anchors(args.anchors), name=args.name or args.model, device=device))
 
 
 def cmd_attack(args):
@@ -78,7 +82,7 @@ def cmd_attack(args):
     from .watermark import report
 
     model, tok, device = _load(args, args.model)
-    anchors = torch.load(args.anchors)
+    anchors = _load_anchors(args.anchors)
     name = args.name or f"{args.kind}"
     extra = {}
     if args.kind == "rotate":
@@ -90,9 +94,11 @@ def cmd_attack(args):
         extra["static_probe_cos_after"], _ = attacks.static_probe_cosine(model, anchors, tok, direction)
         del ref
     elif args.kind in ("sft", "concise", "eosmask"):
-        prompts = load_prompts(args.data)[: args.n_examples] if args.data else anchors["heldout_prompts"]
+        prompts = (load_prompts(args.data) if args.data else anchors["heldout_prompts"])[: args.n_examples]
         style = "concise" if args.kind == "concise" else "generic"
-        examples = attacks.make_sft_examples(model, tok, prompts, style=style, seed=args.seed)
+        print(f"[attack] sampling {len(prompts)} attacker responses ({style}, <= {args.gen_tokens} tokens) ...", flush=True)
+        examples = attacks.make_sft_examples(model, tok, prompts, style=style, max_new_tokens=args.gen_tokens, seed=args.seed)
+        print(f"[attack] {len(examples)} examples; fine-tuning ({args.mode}) for {args.steps} steps", flush=True)
         model = attacks.sft_attack(model, tok, examples, steps=args.steps, lr=args.lr, bs=args.bs, mode=args.mode,
                                    mask_eos=args.kind == "eosmask", seed=args.seed)
     elif args.kind.startswith("quant"):
@@ -112,8 +118,9 @@ def cmd_quality(args):
     from .quality import quality_report
 
     model, tok, device = _load(args, args.model)
-    anchors = torch.load(args.anchors)
-    _log(args, quality_report(model, tok, anchors["heldout_prompts"][: args.n], args.ref_file, name=args.name or args.model))
+    anchors = _load_anchors(args.anchors)
+    _log(args, quality_report(model, tok, anchors["heldout_prompts"][: args.n], args.ref_file,
+                              name=args.name or args.model, max_new_tokens=args.max_new_tokens))
 
 
 def main():
@@ -165,6 +172,7 @@ def main():
     p.add_argument("--bs", type=int, default=8)
     p.add_argument("--data", default=None, help="prompt source for attacker SFT (default: held-out built-in prompts)")
     p.add_argument("--n-examples", type=int, default=1000)
+    p.add_argument("--gen-tokens", type=int, default=96, help="max length of sampled attacker responses")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default=None)
     p.add_argument("--out", default=None)
@@ -176,6 +184,7 @@ def main():
     p.add_argument("--anchors", required=True)
     p.add_argument("--ref-file", required=True)
     p.add_argument("--n", type=int, default=64)
+    p.add_argument("--max-new-tokens", type=int, default=128)
     p.add_argument("--name", default=None)
     _common(p)
     p.set_defaults(fn=cmd_quality)

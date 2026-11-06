@@ -48,6 +48,9 @@ def build_tiny(path):
     Qwen2ForCausalLM(cfg).save_pretrained(path)
 
 
+FAST_SFT = ("--n-examples", "32", "--gen-tokens", "24")  # random model never stops: keep generation short
+
+
 def run(*args):
     cmd = [sys.executable, "-m", "eoswm.cli", *args, "--device", "cpu", "--dtype", "fp32"]
     print("\n$", " ".join(cmd[2:]), flush=True)
@@ -67,11 +70,11 @@ def main():
     run("verify", "--model", wm, "--anchors", anchors, "--name", "watermarked(reloaded)", "--results", res)
     run("attack", "--model", wm, "--anchors", anchors, "--kind", "rotate", "--results", res)
     run("attack", "--model", wm, "--anchors", anchors, "--kind", "quant8", "--results", res)
-    run("attack", "--model", wm, "--anchors", anchors, "--kind", "sft", "--steps", "30", "--results", res)
-    run("attack", "--model", base, "--anchors", anchors, "--kind", "sft", "--steps", "30", "--name", "sibling(null)", "--results", res)
+    run("attack", "--model", wm, "--anchors", anchors, "--kind", "sft", "--steps", "30", *FAST_SFT, "--results", res)
+    run("attack", "--model", base, "--anchors", anchors, "--kind", "sft", "--steps", "30", *FAST_SFT, "--name", "sibling(null)", "--results", res)
     ref = os.path.join(work, "ref.pt")
-    run("quality", "--model", base, "--anchors", anchors, "--ref-file", ref, "--n", "16", "--name", "base", "--results", res)
-    run("quality", "--model", wm, "--anchors", anchors, "--ref-file", ref, "--n", "16", "--name", "watermarked", "--results", res)
+    run("quality", "--model", base, "--anchors", anchors, "--ref-file", ref, "--n", "16", "--max-new-tokens", "32", "--name", "base", "--results", res)
+    run("quality", "--model", wm, "--anchors", anchors, "--ref-file", ref, "--n", "16", "--max-new-tokens", "32", "--name", "watermarked", "--results", res)
 
     rows = [json.loads(line) for line in open(res)]
     by = {r["model"]: r for r in rows if "BER" in r}
