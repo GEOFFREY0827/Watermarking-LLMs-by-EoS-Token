@@ -7,7 +7,10 @@ import os
 
 import torch
 
-from .common import input_device, load_model, load_tokenizer, pick_device, pick_dtype
+from .common import TOKENIZER_POINTER, input_device, load_model, load_tokenizer, pick_device, pick_dtype
+
+# held-out prompts [0, QUALITY_N) are reserved for quality evaluation; attackers get the rest
+QUALITY_N = 64
 
 
 def _common(p):
@@ -38,6 +41,8 @@ def _save(model, tok, out):
     os.makedirs(out, exist_ok=True)
     model.save_pretrained(out)
     tok.save_pretrained(out)
+    with open(os.path.join(out, TOKENIZER_POINTER), "w") as f:
+        f.write(tok.name_or_path)
     print(f"saved -> {out}")
 
 
@@ -81,6 +86,8 @@ def cmd_attack(args):
     from .prompts import load_prompts
     from .watermark import report
 
+    if args.kind == "rotate" and args.dtype == "auto":
+        args.dtype = "fp32"  # in bf16 the rotation itself adds visible rounding error over the layers
     model, tok, device = _load(args, args.model)
     anchors = _load_anchors(args.anchors)
     name = args.name or f"{args.kind}"
@@ -89,20 +96,27 @@ def cmd_attack(args):
         before, direction = attacks.static_probe_cosine(model, anchors, tok)
         ref, _, _ = _load(args, args.model)
         model = attacks.rotate_residual_stream(model, seed=args.seed)
-        extra["max_logit_diff_vs_original"] = attacks.max_logit_diff(model, ref, tok, anchors["heldout_prompts"][:4], device)
+        for k, v in attacks.logit_agreement(model, ref, tok, anchors["heldout_prompts"][:8], device).items():
+            extra[f"{k}_vs_original"] = v
         extra["static_probe_cos_before"] = before
         extra["static_probe_cos_after"], _ = attacks.static_probe_cosine(model, anchors, tok, direction)
         del ref
     elif args.kind in ("sft", "concise", "eosmask"):
-        prompts = (load_prompts(args.data) if args.data else anchors["heldout_prompts"])[: args.n_examples]
+        # never train on the prompts reserved for quality evaluation
+        pool = load_prompts(args.data) if args.data else anchors["heldout_prompts"][QUALITY_N:]
+        prompts = pool[: args.n_examples]
         style = "concise" if args.kind == "concise" else "generic"
         print(f"[attack] sampling {len(prompts)} attacker responses ({style}, <= {args.gen_tokens} tokens) ...", flush=True)
         examples = attacks.make_sft_examples(model, tok, prompts, style=style, max_new_tokens=args.gen_tokens, seed=args.seed)
         print(f"[attack] {len(examples)} examples; fine-tuning ({args.mode}) for {args.steps} steps", flush=True)
         model = attacks.sft_attack(model, tok, examples, steps=args.steps, lr=args.lr, bs=args.bs, mode=args.mode,
                                    mask_eos=args.kind == "eosmask", seed=args.seed)
-    elif args.kind.startswith("quant"):
-        model = attacks.fake_quantize(model, n_bits=int(args.kind[5:] or 8))
+    elif args.kind == "quant8":
+        model = attacks.fake_quantize(model, n_bits=8)
+    elif args.kind == "quant4":
+        model = attacks.fake_quantize(model, n_bits=4, group_size=128)
+    elif args.kind == "quant4-tensor":
+        model = attacks.fake_quantize(model, n_bits=4)
     else:
         raise ValueError(args.kind)
     for k, v in extra.items():
@@ -110,6 +124,11 @@ def cmd_attack(args):
     res = report(model, tok, anchors, name=name, device=device)
     res.update(extra)
     _log(args, res)
+    if args.quality_ref:  # evaluate the attacked model in memory: no multi-GB checkpoint on disk
+        from .quality import quality_report
+
+        _log(args, quality_report(model, tok, anchors["heldout_prompts"][:QUALITY_N], args.quality_ref,
+                                  name=name, max_new_tokens=args.quality_tokens))
     if args.out:
         _save(model, tok, args.out)
 
@@ -119,7 +138,7 @@ def cmd_quality(args):
 
     model, tok, device = _load(args, args.model)
     anchors = _load_anchors(args.anchors)
-    _log(args, quality_report(model, tok, anchors["heldout_prompts"][: args.n], args.ref_file,
+    _log(args, quality_report(model, tok, anchors["heldout_prompts"][: min(args.n, QUALITY_N)], args.ref_file,
                               name=args.name or args.model, max_new_tokens=args.max_new_tokens))
 
 
@@ -165,17 +184,23 @@ def main():
     p = sub.add_parser("attack", help="apply a removal attack, then verify")
     p.add_argument("--model", required=True)
     p.add_argument("--anchors", required=True)
-    p.add_argument("--kind", required=True, choices=["rotate", "sft", "concise", "eosmask", "quant8", "quant4"])
+    p.add_argument("--kind", required=True,
+                   choices=["rotate", "sft", "concise", "eosmask", "quant8", "quant4", "quant4-tensor"],
+                   help="quant8: per-tensor int8; quant4: int4 with groups of 128; quant4-tensor: per-tensor int4")
     p.add_argument("--mode", default="lora", choices=["lora", "full"])
     p.add_argument("--steps", type=int, default=300)
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--bs", type=int, default=8)
-    p.add_argument("--data", default=None, help="prompt source for attacker SFT (default: held-out built-in prompts)")
+    p.add_argument("--data", default=None,
+                   help="prompt source for attacker SFT, e.g. hf:tatsu-lab/alpaca (default: held-out built-in prompts "
+                        "not used for quality evaluation)")
     p.add_argument("--n-examples", type=int, default=1000)
     p.add_argument("--gen-tokens", type=int, default=96, help="max length of sampled attacker responses")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default=None)
-    p.add_argument("--out", default=None)
+    p.add_argument("--quality-ref", default=None, help="also run the quality report in memory against this reference file")
+    p.add_argument("--quality-tokens", type=int, default=128)
+    p.add_argument("--out", default=None, help="save the attacked model (several GB; usually not needed)")
     _common(p)
     p.set_defaults(fn=cmd_attack)
 

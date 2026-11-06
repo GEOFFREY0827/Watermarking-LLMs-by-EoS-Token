@@ -85,14 +85,21 @@ def embed_watermark(model, tok, anchors, steps=400, lr=3e-4, bs=8, margin=3.0, l
 
 
 def readout(model, tok, anchors, device=None, bs=8):
-    """Recover bits: transplant effect relative to the base model, thresholded at its median."""
+    """Transplant effects of key and (held-out) non-key pairs under `model` and under the base model."""
     device = device or input_device(model)
     layers = get_layers(model)
     L, eos, pad = anchors["layer"], anchors["eos_ids"], tok.pad_token_id
-    x = patch_delta_all(model, layers, L, eos, anchors["key_pairs"], pad, device, bs) - torch.tensor(anchors["key_delta0"])
-    bits_hat = (x > x.median()).long().tolist()
-    x_nk = patch_delta_all(model, layers, L, eos, anchors["nonkey_eval_pairs"], pad, device, bs) - torch.tensor(anchors["nonkey_eval_delta0"])
-    return x, bits_hat, x_nk
+    d_key = patch_delta_all(model, layers, L, eos, anchors["key_pairs"], pad, device, bs)
+    d_nk = patch_delta_all(model, layers, L, eos, anchors["nonkey_eval_pairs"], pad, device, bs)
+    return d_key, torch.tensor(anchors["key_delta0"]), d_nk, torch.tensor(anchors["nonkey_eval_delta0"])
+
+
+def fit_drift(d_nk, d0_nk):
+    """Least-squares fit d ≈ a + b·d0 on non-key pairs: a model-wide offset and gain on transplant effects
+    (e.g. fine-tuning sharpens the output distribution and scales every effect). Returns (a, b)."""
+    X = torch.stack([torch.ones_like(d0_nk), d0_nk], 1).double()
+    a, b = torch.linalg.lstsq(X, d_nk.double().unsqueeze(1)).solution.squeeze(1).tolist()
+    return a, b
 
 
 def binom_tail(n: int, k: int) -> float:
@@ -100,19 +107,37 @@ def binom_tail(n: int, k: int) -> float:
     return sum(math.comb(n, i) for i in range(k, n + 1)) / 2 ** n
 
 
+def _decode(x, bits):
+    bits_t = torch.tensor(bits)
+    bits_hat = (x > x.median()).long()
+    matches = int((bits_hat == bits_t).sum())
+    sep = (x[bits_t == 1].mean() - x[bits_t == 0].mean()).item()
+    return matches, sep
+
+
 def report(model, tok, anchors, name="model", device=None):
-    x, bits_hat, x_nk = readout(model, tok, anchors, device)
-    bits = anchors["bits"]
-    n = len(bits)
-    matches = sum(int(a == b) for a, b in zip(bits, bits_hat))
-    sep = (x[torch.tensor(bits) == 1].mean() - x[torch.tensor(bits) == 0].mean()).item()
+    """Two readouts:
+      raw        x_i = Δ_i − Δ⁰_i
+      corrected  r_i = Δ_i − (a + b·Δ⁰_i), with (a, b) fitted on held-out non-key pairs (drift reanchoring)
+    """
+    d_key, d0_key, d_nk, d0_nk = readout(model, tok, anchors, device)
+    bits, n = anchors["bits"], len(anchors["bits"])
+    m_raw, sep_raw = _decode(d_key - d0_key, bits)
+    a, b = fit_drift(d_nk, d0_nk)
+    m_cor, sep_cor = _decode(d_key - (a + b * d0_key), bits)
     res = {
         "model": name,
         "n_bits": n,
-        "BER": 1 - matches / n,
-        "p_value": binom_tail(n, matches),
-        "bit_separation": sep,                      # mean(x | bit 1) - mean(x | bit 0), log-odds units
-        "nonkey_abs_shift": x_nk.abs().mean().item(),  # specificity: should stay small
+        "BER": 1 - m_raw / n,
+        "p_value": binom_tail(n, m_raw),
+        "bit_separation": sep_raw,                          # mean(x | bit 1) - mean(x | bit 0), log-odds
+        "BER_corrected": 1 - m_cor / n,
+        "p_value_corrected": binom_tail(n, m_cor),
+        "bit_separation_corrected": sep_cor,
+        "drift_offset": a,                                   # base model: a = 0, b = 1
+        "drift_gain": b,
+        "nonkey_abs_shift": (d_nk - d0_nk).abs().mean().item(),            # raw specificity
+        "nonkey_abs_resid": (d_nk - (a + b * d0_nk)).abs().mean().item(),  # after drift correction
     }
     print(" | ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in res.items()), flush=True)
     return res

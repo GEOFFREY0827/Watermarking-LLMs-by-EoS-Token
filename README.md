@@ -88,6 +88,11 @@ python scripts/summarize.py runs/Qwen2.5-1.5B-Instruct/results.jsonl
 
 日志在 `runs/<model>/logs/`。额外参数可以通过 `ANCHOR_ARGS`、`EMBED_ARGS` 传入，例如 `EMBED_ARGS="--lam-eos 5"`。
 
+- 攻击后的模型直接在内存里评估质量，**不写盘**（1.5B 每个约 3 GB，容易超出磁盘配额）；只有水印模型会保存；
+- `REUSE=1`：复用已有的 `anchors.pt`、`wm/`、`ref.pt`，只重跑验证和攻击；
+- `ATTACK_DATA=hf:tatsu-lab/alpaca`：攻击者用真实的指令数据微调（需要 `datasets`）。默认使用内置 prompt 中**未用于质量评估**的部分；
+- 每次运行会把旧的 `results.jsonl` 改名备份。
+
 单独的命令：
 
 ```bash
@@ -109,10 +114,13 @@ python -m eoswm.cli quality --model runs/x/wm --anchors runs/x/anchors.pt --ref-
 | `p_value` | 匹配数在 Bin(n, ½) 下的单侧尾概率 | 水印模型极小 |
 | `bit_separation` | mean(x \| bit 1) − mean(x \| bit 0)，log-odds 单位 | ≈ 2m |
 | `nonkey_abs_shift` | 非键对 transplant 效应偏离基座的平均幅度 | 小（特异性 / 泄露） |
+| `BER_corrected` 等 | **漂移校正读出**：在非键对上拟合 Δ ≈ a + b·Δ⁰（`drift_offset`、`drift_gain`），用键对的残差解码 | 微调会整体缩放移植效应，校正后应更接近 0 |
+| `nonkey_abs_resid` | 校正后非键对的残差 | 小 |
 | `avg_len` / `stop_rate` | 留出 prompt 上的贪心生成长度、自然停止比例 | 与基座接近 |
 | `ref_nll` | 基座回复（含停止 token）在该模型下的 NLL | 与基座接近 |
 
-攻击：`rotate`（保函数的残差流正交旋转）、`quant8/4`（逐张量对称伪量化）、`sft-lora` / `sft-full`
+攻击：`rotate`（保函数的残差流正交旋转，默认在 fp32 下做，报告 top-1 一致率）、`quant8`（逐张量 int8）、
+`quant4`（int4，每 128 个权重一组；`quant4-tensor` 为逐张量 int4，会直接破坏模型）、`sft-lora` / `sft-full`
 （攻击者自采样数据做 LoRA / 全参数 SFT）、`concise-lora`（只保留第一句话再 SFT，改变终止和长度行为）、
 `eosmask-lora`（复现 pad==eos 掩码 bug，EOS 不再被监督）。
 零假设：`base` 与 `null:sibling-sft`（基座做同样的微调）。

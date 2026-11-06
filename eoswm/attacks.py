@@ -148,16 +148,27 @@ def sft_attack(model, tok, examples, steps=300, lr=None, bs=8, mode="lora", mask
 
 
 # --------------------------------------------------------------------------- #
-# 3. Quantization (symmetric per-tensor fake quantization, as in SEAL's setup)
+# 3. Quantization: symmetric round-to-nearest fake quantization of every Linear weight.
+#    group_size=None -> one scale per tensor (SEAL's 8-bit setup);
+#    group_size=128  -> one scale per 128 input weights of each row (the usual 4-bit RTN / GPTQ / AWQ grouping;
+#                       per-tensor 4-bit simply destroys the model).
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def fake_quantize(model, n_bits=8):
+def fake_quantize(model, n_bits=8, group_size=None):
     qmax = 2 ** (n_bits - 1) - 1
     for mod in model.modules():
-        if isinstance(mod, torch.nn.Linear):
-            w = mod.weight.data
-            scale = w.abs().max().float() / qmax
-            mod.weight.data = (torch.round(w.float() / scale).clamp(-qmax, qmax) * scale).to(w.dtype)
+        if not isinstance(mod, torch.nn.Linear):
+            continue
+        w = mod.weight.data.float()
+        out_f, in_f = w.shape
+        if group_size and in_f % group_size == 0:
+            g = w.view(out_f, in_f // group_size, group_size)
+            scale = (g.abs().amax(-1, keepdim=True) / qmax).clamp_min(1e-12)
+            w_q = (torch.round(g / scale).clamp(-qmax, qmax) * scale).view(out_f, in_f)
+        else:
+            scale = (w.abs().max() / qmax).clamp_min(1e-12)
+            w_q = torch.round(w / scale).clamp(-qmax, qmax) * scale
+        mod.weight.data = w_q.to(mod.weight.dtype)
     return model
 
 
@@ -165,11 +176,18 @@ def fake_quantize(model, n_bits=8):
 # Diagnostics
 # --------------------------------------------------------------------------- #
 @torch.no_grad()
-def max_logit_diff(m1, m2, tok, prompts, device):
+def logit_agreement(m1, m2, tok, prompts, device):
+    """How function-preserving m1 is w.r.t. m2 on some prompts: max / mean |Δlogit| and top-1 agreement."""
     ids, mask = pad_batch([prompt_ids(tok, p) for p in prompts], tok.pad_token_id, device)
     a = m1(input_ids=ids, attention_mask=mask).logits.float()
     b = m2(input_ids=ids, attention_mask=mask).logits.float()
-    return (a - b).abs().max().item()
+    valid = mask.bool()
+    diff = (a - b).abs()[valid]
+    return {
+        "max_logit_diff": diff.max().item(),
+        "mean_logit_diff": diff.mean().item(),
+        "top1_agreement": (a.argmax(-1) == b.argmax(-1))[valid].float().mean().item(),
+    }
 
 
 @torch.no_grad()

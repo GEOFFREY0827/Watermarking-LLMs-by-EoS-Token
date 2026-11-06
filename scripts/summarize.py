@@ -6,12 +6,20 @@ rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
 ver = [r for r in rows if "BER" in r]
 qual = [r for r in rows if "ref_nll" in r]
 
-print("\n| model | BER | p-value | bit separation | non-key abs shift | extra |")
-print("|---|---|---|---|---|---|")
+
+def g(r, k, fmt):
+    return format(r[k], fmt) if k in r else "-"
+
+
+print("\n| model | BER | p-value | sep | BER (drift-corr.) | p (corr.) | sep (corr.) | drift a / b | non-key shift / resid | extra |")
+print("|---|---|---|---|---|---|---|---|---|---|")
 for r in ver:
-    extra = ", ".join(f"{k}={r[k]:.3g}" for k in r if k.startswith(("max_logit", "static_probe")))
-    print(f"| {r['model']} | {r['BER']:.3f} | {r['p_value']:.2e} | {r['bit_separation']:.3f} | "
-          f"{r['nonkey_abs_shift']:.3f} | {extra} |")
+    extra = ", ".join(f"{k.replace('_vs_original', '')}={r[k]:.3g}" for k in r
+                      if k.endswith("_vs_original") or k.startswith("static_probe"))
+    print(f"| {r['model']} | {g(r, 'BER', '.3f')} | {g(r, 'p_value', '.1e')} | {g(r, 'bit_separation', '.2f')} | "
+          f"{g(r, 'BER_corrected', '.3f')} | {g(r, 'p_value_corrected', '.1e')} | {g(r, 'bit_separation_corrected', '.2f')} | "
+          f"{g(r, 'drift_offset', '.2f')} / {g(r, 'drift_gain', '.3f')} | "
+          f"{g(r, 'nonkey_abs_shift', '.2f')} / {g(r, 'nonkey_abs_resid', '.2f')} | {extra} |")
 
 if qual:
     print("\n| model | avg len | stop rate | NLL on base responses |")

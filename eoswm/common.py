@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from typing import Iterable, Sequence
 
 import torch
@@ -42,7 +43,16 @@ def input_device(model) -> torch.device:
     return model.get_input_embeddings().weight.device
 
 
+TOKENIZER_POINTER = "eoswm_tokenizer_source.txt"
+
+
 def load_tokenizer(path: str):
+    """Saved eoswm models point back to the original tokenizer (re-saved tokenizers can trigger
+    spurious regex warnings in some transformers versions)."""
+    pointer = os.path.join(path, TOKENIZER_POINTER)
+    if os.path.isfile(pointer):
+        with open(pointer) as f:
+            path = f.read().strip()
     tok = AutoTokenizer.from_pretrained(path)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
