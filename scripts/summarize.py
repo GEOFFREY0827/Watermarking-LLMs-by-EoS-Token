@@ -15,7 +15,9 @@ print("\n| model | BER | p-value | sep | BER (drift-corr.) | p (corr.) | sep (co
 print("|---|---|---|---|---|---|---|---|---|---|")
 for r in ver:
     extra = ", ".join(f"{k.replace('_vs_original', '')}={r[k]:.3g}" for k in r
-                      if k.endswith("_vs_original") or k.startswith("static_probe"))
+                      if k.endswith("_vs_original") or k.startswith(("static_probe", "BER_ctrl", "BER_multilayer", "BER_L")))
+    if r.get("encoding") == "diff":
+        extra = ("diff encoding; " + extra).rstrip("; ")
     print(f"| {r['model']} | {g(r, 'BER', '.3f')} | {g(r, 'p_value', '.1e')} | {g(r, 'bit_separation', '.2f')} | "
           f"{g(r, 'BER_corrected', '.3f')} | {g(r, 'p_value_corrected', '.1e')} | {g(r, 'bit_separation_corrected', '.2f')} | "
           f"{g(r, 'drift_offset', '.2f')} / {g(r, 'drift_gain', '.3f')} | "

@@ -53,7 +53,9 @@ def cmd_build_anchors(args):
     anchors = build_anchors(model, tok, args.key, n_bits=args.n_bits, layer=args.layer, prompt_source=args.prompts,
                             max_new_tokens=args.max_new_tokens, stop_tau=args.stop_tau,
                             require_natural_stop=not args.allow_forced_stop, device=device,
-                            position=args.position, readout=args.readout, pairs_per_bit=args.pairs_per_bit)
+                            position=args.position, readout=args.readout, pairs_per_bit=args.pairs_per_bit,
+                            encoding=args.encoding, diff_candidates=args.diff_candidates,
+                            stability_steps=args.stability_steps, stability_oversample=args.stability_oversample)
     anchors["base_model"] = args.model
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     torch.save(anchors, args.out)
@@ -61,7 +63,22 @@ def cmd_build_anchors(args):
     print(f"anchors -> {args.out} | position {args.position} | readout {args.readout} | "
           f"layer {anchors['layer']} | {len(anchors['bits'])} bits | "
           f"natural-stop rate {anchors['natural_stop_rate']:.2f} | base transplant effect "
-          f"mean {d0.mean():.2f} sd {d0.std():.2f} | commitment {anchors['commitment']}")
+          f"mean {d0.mean():.2f} sd {d0.std():.2f} | encoding {anchors['encoding']} | commitment {anchors['commitment']}")
+    if anchors.get("stability"):
+        st = anchors["stability"]
+        print(f"stability probe: gain {st['gain']:.3f} offset {st['offset']:.2f} | instability of candidates "
+              f"{st['candidates_instability']:.2f} -> selected {st['selected_instability']:.2f}")
+
+
+def cmd_augment_anchors(args):
+    from .anchors import augment_anchors
+
+    model, tok, device = _load(args, args.model)
+    anchors = _load_anchors(args.anchors)
+    layers = [int(x) for x in args.extra_layers.split(",") if x.strip()] if args.extra_layers else []
+    out = augment_anchors(model, tok, anchors, n_controls=args.controls, extra_layers=layers, device=device)
+    torch.save(out, args.out)
+    print(f"augmented anchors -> {args.out} (key pairs and bits unchanged)")
 
 
 def cmd_embed(args):
@@ -227,6 +244,15 @@ def main():
                    help="ablation: take A's state at its stop position (default) or at a random response token")
     p.add_argument("--readout", default="eos", choices=["eos", "token"],
                    help="ablation: measure EOS log-odds (default) or a key-chosen ordinary token's log-odds")
+    p.add_argument("--encoding", default="classic", choices=["classic", "diff"],
+                   help="classic: bit from Δ − Δ⁰ of one transplant; diff: bit = sign(Δ⁺ − Δ⁻) of two transplants into "
+                        "the same B (immune to global gain/offset drift, no Δ⁰ needed)")
+    p.add_argument("--diff-candidates", type=int, default=4,
+                   help="diff: candidate A's per B; the pair with the smallest natural difference is used")
+    p.add_argument("--stability-steps", type=int, default=0,
+                   help="> 0: probe LoRA fine-tune of the base for this many steps, keep the candidates that drift least")
+    p.add_argument("--stability-oversample", type=int, default=3,
+                   help="classic + stability: candidates per kept key pair")
     p.add_argument("--pairs-per-bit", type=int, default=1,
                    help="redundant coding: key pairs per bit, averaged at readout (noise / sqrt(k)); "
                         "needs 2 * n_bits * k usable responses")
@@ -250,6 +276,15 @@ def main():
                    help="save the full merged model (several GB) instead of the LoRA adapter")
     _common(p)
     p.set_defaults(fn=cmd_embed)
+
+    p = sub.add_parser("augment-anchors", help="add shared-B controls / extra-layer base effects to existing anchors")
+    p.add_argument("--model", required=True, help="the BASE model the anchors were built with")
+    p.add_argument("--anchors", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--controls", type=int, default=4, help="control A's per key pair (0 = none)")
+    p.add_argument("--extra-layers", default="", help="e.g. 12,14,18,20: base effects for the multi-layer readout")
+    _common(p)
+    p.set_defaults(fn=cmd_augment_anchors)
 
     p = sub.add_parser("verify", help="recover bits by activation patching")
     p.add_argument("--model", required=True)

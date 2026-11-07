@@ -100,6 +100,14 @@ python scripts/summarize.py runs/Qwen2.5-1.5B-Instruct/results.jsonl
   模型之间的**相对**比较（实现很轻量，不能直接和公开榜单数字对比）；需要 `pip install datasets`；
 - **冗余编码**：`ANCHOR_ARGS="--pairs-per-bit 4"`，每个比特由 4 个键对携带，读出时取平均，噪声约降为 1/2。
   键对数变成 `NBITS × 4`，建议同时增加 `STEPS`。
+- **差分编码**：`ANCHOR_ARGS="--encoding diff"`，每个比特 = 两次移植到**同一个 B**（A⁺ 和 A⁻），比特 = sign(Δ⁺ − Δ⁻)。
+  B 的干净项相互抵消，整体的增益和偏移漂移无法翻转它，也不需要基座的 Δ⁰；A⁺/A⁻ 从 `--diff-candidates` 个候选中
+  挑自然差最小的一对（嵌入成本低）。
+- **按稳定性挑选键对**：`ANCHOR_ARGS="--stability-steps 200"`，构造锚点时先在基座上做一次探测性的 LoRA 微调
+  （之后卸掉，基座不变），只保留扣除整体增益后漂移最小的候选。
+- **不重训也能试的读出改进**：`augment-anchors` 给**已有**的锚点文件加上共享 B 的对照移植和其他层的基座效应
+  （键对和比特不变），`verify` / `attack` 随后会额外报告 `BER_ctrl`（减去同一 B 上对照移植的效应）和
+  `BER_multilayer`（各层残差按噪声归一化后平均）。
 
 单独的命令：
 
